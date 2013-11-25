@@ -1,3 +1,7 @@
 *.swp
 *.hi
 *.o
+Qlen
+*.inp
+*.json
+*.png
