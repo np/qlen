@@ -24,6 +24,6 @@ main = interactT $ T.unlines
                  . map (second Set.size)
                  . Map.toList
                  . Map.fromListWith Set.union
-                 . map (\[x,y] -> (cutSeconds x,Set.singleton y))
+                 . map (\[time,mac] -> (cutSeconds time,Set.singleton mac))
                  . map T.words
                  . T.lines

@@ -16,9 +16,9 @@ colorSchm knownMacs x
   | x `elem` knownMacs = "bright"
   | otherwise          = "pale"
 
-showEntry knownMacs (x,P y z)
-  = [y <> " >" <> x <> " /" <> colorSchm knownMacs x <> "/" <> x
-    ,z <> " <" <> x
+showEntry knownMacs (mac,P minP maxP)
+  = [minP <> " >" <> mac <> " /" <> colorSchm knownMacs mac <> "/" <> mac
+    ,maxP <> " <" <> mac
     ]
 
 interactT f = T.putStr . f =<< T.getContents
@@ -30,5 +30,6 @@ main = do
                  . sortBy (compare `on` minP . snd)
                  . Map.toList
                  . Map.fromListWith minMax
-                 . map ((\[x,y] -> (y,P x x)) . T.words)
+                 . map (\[time,mac] -> (mac,P time time))
+                 . map T.words
                  . T.lines
