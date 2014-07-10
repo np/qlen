@@ -1,10 +1,11 @@
-{-# LANGUAGE BangPatterns, OverloadedStrings #-}
+{-# LANGUAGE BangPatterns, OverloadedStrings, GeneralizedNewtypeDeriving #-}
 import Control.Applicative
 import Control.Arrow
 import Control.Monad
 import Data.Aeson
 import Data.Function
-import Data.Functor
+--import Data.Functor
+import Data.String
 import Data.Hashable
 import Data.List
 import Data.Monoid
@@ -18,6 +19,10 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Crypto.Hash.SHA256 as H
 
+type Time = T.Text
+newtype Mac = Mac { unMac :: T.Text }
+  deriving (Eq, Hashable)
+type Key = S.ByteString
 data Entry time signal mac sensor = Entry { time :: time, signal :: signal, mac :: mac, sensor :: sensor }
 
 unpackS :: T.Text -> S.ByteString
@@ -26,8 +31,12 @@ unpackS = S.pack . T.unpack
 packS :: S.ByteString -> T.Text
 packS = T.pack . S.unpack
 
-anonymizer :: S.ByteString -> T.Text -> T.Text
-anonymizer secretKey x = T.intercalate ":" . T.chunksOf 2 . packS . B16.encode . S.take 6 $ H.hash (secretKey <> unpackS x)
+-- Take the 6 first bytes and present them as a MAC address (00:01:02:03:04:05)
+takeMAC :: S.ByteString -> Mac
+takeMAC = Mac . T.intercalate ":" . T.chunksOf 2 . packS . B16.encode . S.take 6
+
+anonymizer :: Key -> Mac -> Mac
+anonymizer secretKey = takeMAC . H.hash . (secretKey <>) . unpackS . unMac
 
 -- Input list should be ordered
 intervals :: (Ord a, Num a) => a -> [a] -> [(a,a)]
@@ -47,7 +56,7 @@ interactT :: (T.Text -> T.Text) -> IO ()
 interactT f = T.putStr . f =<< T.getContents
 
 -- TODO use strftime
-to_seconds :: T.Text -> Int
+to_seconds :: Time -> Int
 to_seconds = (\[h,m,s] -> (h * 60 + m) * 60 + s) . map (read . T.unpack) . T.splitOn ":" . fst . T.breakOn "."
 
 from_seconds :: Int -> T.Text
@@ -80,35 +89,47 @@ extract_distances = liftA2 MinMax minimum maximum . map (uncurry dist) . (zip`ap
 extract_distances' :: [Int] -> [MinMax Int]
 extract_distances' []  = []
 extract_distances' [_] = []
-extract_intervals' xs  = [extract_distances xs]
+extract_distances' xs  = [extract_distances xs]
 
+extract_intervals :: Set.HashSet Int -> [StartStop Int]
 extract_intervals = map (uncurry StartStop) . intervals 60 . sort . Set.toList
 
+showT :: Int -> T.Text
 showT = T.pack . show
 
+merge_start_stop :: Ord a => StartStop a -> StartStop a -> StartStop a
 merge_start_stop (StartStop x y) (StartStop z t) = StartStop (x `min` z) (y `max` t)
 
+color_scheme :: (Eq a, IsString b) => [a] -> a -> b
 color_scheme macs x
   | x `elem` macs = "bright"
   | otherwise     = "pale"
 
+show_mac_start_stop :: [Mac] -> (Mac, StartStop Time) -> [[T.Text]]
 show_mac_start_stop macs (mac,StartStop start stop)
-  = [[start, ">" <> mac, "/" <> color_scheme macs mac <> "/" <> mac]
-    ,[stop,  "<" <> mac]
+  = [[start, ">" <> unMac mac, "/" <> color_scheme macs mac <> "/" <> unMac mac]
+    ,[stop,  "<" <> unMac mac]
     ]
 
+show_maccount :: (T.Text, Int) -> [T.Text]
 show_maccount (t,n) = [t, "=S", showT n]
 
+approx_time_10min :: Time -> Time
+approx_time_1min  :: Time -> Time
+approx_time_1sec  :: Time -> Time
 approx_time_10min = (<> "0:00") . T.init . T.init . fst . T.breakOnEnd ":"
-approx_time_1min  = (<> ":00") . T.init . fst . T.breakOnEnd ":"
+approx_time_1min  = (<> "00") . fst . T.breakOnEnd ":"
 approx_time_1sec  = id
 
-read_entries = map (\[time,signal,mac,sensor] -> Entry time signal mac sensor) . map T.words . T.lines
+read_entries :: T.Text -> [Entry T.Text T.Text Mac T.Text]
+read_entries = map (\[time,signal,mac,sensor] -> Entry time signal (Mac mac) sensor) . map T.words . T.lines
 
+interact_with_entries :: ([Entry T.Text T.Text Mac T.Text] -> [[T.Text]]) -> IO ()
 interact_with_entries f = interactT $ T.unlines . map T.unwords . f . read_entries
 
+interact_with_entries_json :: (ToJSON a) => T.Text -> ([Entry T.Text T.Text Mac T.Text] -> [(Mac, a)]) -> IO ()
 interact_with_entries_json lbl f = interactT $ T.pack . B.unpack . encode . map mac_info_json . f . read_entries
-  where mac_info_json (mac, p) = object ["mac" .= mac, lbl .= p]
+  where mac_info_json (Mac mac, p) = object ["mac" .= mac, lbl .= p]
 
 extract_time_info :: (Eq mac, Hashable mac)
                   => (time -> info)
@@ -117,27 +138,32 @@ extract_time_info :: (Eq mac, Hashable mac)
                   -> [Entry time signal mac sensor]
                   -> [(mac,extracted)]
 extract_time_info ftime fappend fextract
-  = concatMap (\(x,y) -> map ((,)x) (fextract y))
+  = distr
   . groupWith fappend
   . map (\e -> (mac e, ftime (time e)))
+  where distr inp = [ (m,e) | (m,i) <- inp, e <- fextract i ]
 
+macinfo_json :: IO ()
 macinfo_json
   = interact_with_entries_json "info" $
       extract_time_info (Set.singleton . to_seconds) Set.union (extract_distances' . Set.toList)
 
+macinfo :: IO ()
 macinfo
   = interact_with_entries $
                 concatMap (show_mac_start_stop [] . second (fmap from_seconds))
               . sortBy (compare `on` start . snd)
               . extract_time_info (Set.singleton . to_seconds) Set.union extract_intervals
 
+minmax :: IO ()
 minmax =
- do macs <- T.lines <$> T.readFile "macs"
+ do macs <- map Mac . T.lines <$> T.readFile "macs"
     interact_with_entries $
                 concatMap (show_mac_start_stop macs)
               . sortBy (compare `on` start . snd)
               . extract_time_info (\time -> StartStop time time) merge_start_stop pure
 
+count_macs :: (T.Text -> T.Text) -> IO ()
 {-
 count_macs
   = interact_with_entries $
@@ -154,23 +180,27 @@ count_macs approx_time
               . groupWith Set.union
               . map (\e -> (approx_time (time e), Set.singleton (mac e)))
 
+xpose :: IO ()
 xpose
   = interact_with_entries_json "times" $
       extract_time_info Set.singleton Set.union pure
 
+map_entries :: (Time -> Time) -> (Mac -> Mac) -> IO ()
 map_entries ftime fmac
-  = interact_with_entries $ map (\e -> [ftime (time e), signal e, fmac (mac e), sensor e])
+  = interact_with_entries $ map (\e -> [ftime (time e), signal e, unMac (fmac (mac e)), sensor e])
 
+anon :: Key -> IO ()
 anon = map_entries id . anonymizer
 
+interaction :: [String] -> IO ()
 interaction ["macinfo"] = macinfo
+interaction ["macinfo-json"] = macinfo_json
 interaction ["minmax"]  = minmax
 interaction ["sum"]     = count_macs approx_time_1min
 interaction ["xpose"]   = xpose
 interaction ["anon",key]= anon (S.pack key)
 interaction args = error . unlines $ ["Unpexcted arguments: " ++ show args
-                                     ,"Usage: qlen [macinfo|minmax|sum|xpose]"]
-
+                                     ,"Usage: qlen [macinfo|macinfo-json|minmax|sum|xpose]"]
 
 main :: IO ()
 main = interaction =<< getArgs
