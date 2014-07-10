@@ -27,6 +27,22 @@ def BigNum_mod_inverse(a,n):
 curve = Curve('secp256k1')
 G = curve.G
 
+def check(P):
+    a = P + P
+    b = 2 * P
+    c = P.dbl()
+    print a
+    print b
+    print c
+    assert (a == b)
+    assert (c == b)
+check(G)
+check(7439794723947237947297 * G)
+print(0 * G)
+print(G)
+print(1 * G)
+exit(1)
+
 def Enc(Pk, M):
     r = RandomBN()
     C0 = r * G
